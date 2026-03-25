@@ -106,14 +106,22 @@ test('FreezeHost 多账号全自动续期', async () => {
             await page.fill('input[name="password"]', password);
             await page.click('button[type="submit"]');
 
-            const twoFaInput = page.locator('input[autocomplete="one-time-code"], input[placeholder*="6"]');
-            if (await twoFaInput.isVisible({ timeout: 5000 }).catch(() => false)) {
-                if (!twoFaSecret) throw new Error("触发了 2FA，但未配置该账号的 2FA 秘钥");
-                console.log('🔐 自动填写 2FA...');
+            // ⬇️⬇️⬇️ 修复版 2FA 抢救逻辑开始 ⬇️⬇️⬇️
+            const twoFaInput = page.locator('input[autocomplete="one-time-code"], input[placeholder*="6"], input[maxlength="6"]');
+            
+            // 抢救核心：强行让脚本在这里盯防 8 秒，真正等待 2FA 输入框出现
+            await twoFaInput.waitFor({ state: 'visible', timeout: 8000 }).catch(() => {});
+            
+            if (await twoFaInput.isVisible()) {
+                if (!twoFaSecret) throw new Error("❌ 触发了 2FA，但未配置该账号的 2FA 秘钥 (格式: 账号,密码,秘钥)");
+                console.log('🔐 发现 2FA 页面，正在自动计算并填写...');
                 const token = authenticator.generate(twoFaSecret.replace(/\s/g, ''));
                 await twoFaInput.fill(token);
+                await page.waitForTimeout(500); // 稍微停顿，防止输太快按钮没反应
                 await page.click('button[type="submit"]');
+                await page.waitForTimeout(4000); // 提交验证码后，给它 4 秒钟的时间跳转
             }
+            // ⬆️⬆️⬆️ 修复版 2FA 抢救逻辑结束 ⬆️⬆️⬆️
 
             await page.waitForTimeout(5000);
             const authBtn = page.locator('button:has-text("Authorize"), button:has-text("授权")');
