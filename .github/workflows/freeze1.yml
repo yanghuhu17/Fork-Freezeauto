@@ -45,3 +45,6 @@ jobs:
           TG_BOT:           ${{ secrets.TG_BOT }}
           GOST_PROXY:       http://127.0.0.1:8080
         run: npx playwright test tests/freeze.spec.js
+
+      # 👇 就是下面这行注释。它的唯一作用是让你能产生一次新的提交，踹醒 GitHub 的定时器
+      # fix: 强行刷新一次工作流，重新注册 cron 定时任务
