@@ -1,7 +1,7 @@
 name: 🎮 FreezeHost 自动续期
 on:
   schedule:
-    - cron: '10 2 * * *' # 每天 UTC 时间 2:10 (北京时间早上 10:10) 自动运行
+    - cron: '50 2 * * *' # 每天 UTC 时间 2:10 (北京时间早上 10:50) 自动运行
   workflow_dispatch:     # 允许在网页上手动执行
   
 jobs:
