@@ -28,7 +28,7 @@ async function killAllAds(page) {
     } catch { }
 }
 
-// 📨 发送 TG 消息 (直接发送拼装好的完整内容)
+// 📨 发送 TG 消息
 function sendTG(fullReport) {
     return new Promise((resolve) => {
         if (!TG_CHAT_ID || !TG_TOKEN) return resolve();
@@ -203,11 +203,21 @@ test('FreezeHost 多账号全自动续期', async () => {
                             const btnText = (await renewBtn.innerText()).trim();
                             if (btnText.toLowerCase().includes('renew instance')) {
                                 
-                                // 💡 优化 1：点击前等 1 秒，确保绑定事件已加载，加 delay 模拟物理按下
-                                await page.waitForTimeout(1000);
-                                await renewBtn.click({ force: true, delay: 150 });
+                                // 💡 核心修复：彻底抛弃 force: true，改为物理真实点击
+                                await page.waitForTimeout(1500); // 等待弹窗淡入动画完全结束
                                 
-                                // 给后端处理扣费的反应时间
+                                // 精准锁定带有 RENEW INSTANCE 的那个黄色按钮
+                                const realRenewBtn = page.locator('a:has-text("RENEW INSTANCE"), button:has-text("RENEW INSTANCE")').first();
+                                
+                                if (await realRenewBtn.isVisible()) {
+                                    await realRenewBtn.hover(); // 鼠标移过去，模拟真实操作
+                                    await page.waitForTimeout(300);
+                                    await realRenewBtn.click({ delay: 150 }); // 绝对不加 force: true，确保触发网页后端事件
+                                } else {
+                                    // 备用方案定位
+                                    await page.locator('text="RENEW INSTANCE"').last().click({ delay: 150 });
+                                }
+                                
                                 await page.waitForTimeout(6000); 
 
                                 if (page.url().includes('err=CANNOTAFFORDRENEWAL')) {
@@ -215,7 +225,6 @@ test('FreezeHost 多账号全自动续期', async () => {
                                     continue;
                                 }
 
-                                // 💡 优化 2：智能轮询刷新。不一棍子打死，最多重试 3 次！
                                 let success = false;
                                 let postTime;
                                 console.log(`  🔄 开始验证时间更新...`);
@@ -227,7 +236,7 @@ test('FreezeHost 多账号全自动续期', async () => {
                                     
                                     if (postTime.totalDays > preTime.totalDays) {
                                         success = true;
-                                        break; // 成功增加了，直接跳出循环
+                                        break; 
                                     }
                                     
                                     console.log(`  ⏳ 数据未同步，等待 5 秒后重试 (${retry + 1}/3)...`);
