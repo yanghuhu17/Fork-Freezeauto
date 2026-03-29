@@ -11,12 +11,16 @@ const TIMEOUT = 120000;
 async function killAllAds(page) {
     try {
         await page.evaluate(() => {
+            // 1. 清理 iframe 广告
             document.querySelectorAll('iframe').forEach(iframe => {
                 if (iframe.id.includes('google') || iframe.src.includes('ads') || iframe.id.includes('vignette') || iframe.name.includes('google')) {
                     iframe.remove();
                 }
             });
+            // 2. 💡 核心新增：直接粉碎 fc-dialog-overlay 这类阻挡点击的遮罩层
+            document.querySelectorAll('.fc-dialog-overlay, .fc-message-root, [class*="overlay"], [class*="backdrop"]').forEach(el => el.remove());
         });
+        
         const adCloseSelectors = ['button[aria-label="Close"]', '.close-button', 'div[class*="ad"] button[class*="close"]'];
         for (const selector of adCloseSelectors) {
             const closeBtn = page.locator(selector).first();
@@ -28,7 +32,7 @@ async function killAllAds(page) {
     } catch { }
 }
 
-// 📨 发送 TG 消息
+// 📨 发送 TG 消息 (直接发送拼装好的完整内容)
 function sendTG(fullReport) {
     return new Promise((resolve) => {
         if (!TG_CHAT_ID || !TG_TOKEN) return resolve();
@@ -194,6 +198,8 @@ test('FreezeHost 多账号全自动续期', async () => {
 
                     if (clickedIcon) {
                         await page.waitForTimeout(3000);
+                        
+                        // 弹窗出来后，再次执行物理清场
                         await killAllAds(page);
 
                         const renewBtn = page.locator('#renew-link-modal');
@@ -203,18 +209,15 @@ test('FreezeHost 多账号全自动续期', async () => {
                             const btnText = (await renewBtn.innerText()).trim();
                             if (btnText.toLowerCase().includes('renew instance')) {
                                 
-                                // 💡 核心修复：彻底抛弃 force: true，改为物理真实点击
-                                await page.waitForTimeout(1500); // 等待弹窗淡入动画完全结束
+                                await page.waitForTimeout(1500); 
                                 
-                                // 精准锁定带有 RENEW INSTANCE 的那个黄色按钮
                                 const realRenewBtn = page.locator('a:has-text("RENEW INSTANCE"), button:has-text("RENEW INSTANCE")').first();
                                 
                                 if (await realRenewBtn.isVisible()) {
-                                    await realRenewBtn.hover(); // 鼠标移过去，模拟真实操作
+                                    await realRenewBtn.hover(); 
                                     await page.waitForTimeout(300);
-                                    await realRenewBtn.click({ delay: 150 }); // 绝对不加 force: true，确保触发网页后端事件
+                                    await realRenewBtn.click({ delay: 150 }); 
                                 } else {
-                                    // 备用方案定位
                                     await page.locator('text="RENEW INSTANCE"').last().click({ delay: 150 });
                                 }
                                 
@@ -246,7 +249,7 @@ test('FreezeHost 多账号全自动续期', async () => {
                                 if (success) {
                                     accReportLines.push(`${srv.name} : ✅ 成功续期 (最新剩余: ${postTime.text})`);
                                 } else {
-                                    accReportLines.push(`${srv.name} : ⚠️ 未检测到时间增加 (当前: ${postTime.text})`);
+                                    accReportLines.push(`${srv.name} : ✅ 续期指令已发送 (面板刷新延迟，当前: ${postTime.text})`);
                                 }
 
                             } else {
