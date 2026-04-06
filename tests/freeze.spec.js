@@ -18,7 +18,6 @@ async function killAllAds(page) {
             });
             document.querySelectorAll('.fc-dialog-overlay, .fc-message-root').forEach(el => el.remove());
         });
-
         const adCloseSelectors = ['button[aria-label="Close"]', '.close-button', 'div[class*="ad"] button[class*="close"]'];
         for (const selector of adCloseSelectors) {
             const closeBtn = page.locator(selector).first();
@@ -34,12 +33,10 @@ async function killAllAds(page) {
 function sendTG(fullReport) {
     return new Promise((resolve) => {
         if (!TG_CHAT_ID || !TG_TOKEN) return resolve();
-
         const req = https.request({
             hostname: 'api.telegram.org', path: `/bot${TG_TOKEN}/sendMessage`,
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-        }, (res) => resolve());
-
+        }, () => resolve());
         req.on('error', () => resolve());
         req.setTimeout(10000, () => { req.destroy(); resolve(); });
         req.write(JSON.stringify({ chat_id: TG_CHAT_ID, text: fullReport }));
@@ -51,108 +48,151 @@ function sendTG(fullReport) {
 async function getRemainingTime(page) {
     const text = await page.evaluate(() => document.getElementById('renewal-status-console')?.innerText.trim());
     if (!text) return { text: "获取失败", totalDays: 0 };
-
     const daysMatch = text.match(/(\d+(?:\.\d+)?)\s*day/i);
     const hoursMatch = text.match(/(\d+(?:\.\d+)?)\s*hour/i);
-
     const days = daysMatch ? parseInt(daysMatch[1]) : 0;
     const hoursRaw = hoursMatch ? parseFloat(hoursMatch[1]) : 0;
     const hours = Math.floor(hoursRaw);
     const minutes = Math.round((hoursRaw - hours) * 60);
-
     return {
         text: `${days}天 ${hours}小时 ${minutes}分钟`,
         totalDays: days + (hoursRaw / 24)
     };
 }
 
-// 🔐 处理 Discord 登录后的所有 MFA 情况（通行密钥 / 直接2FA / 中英文界面）
+// 🔍 调试：打印页面上所有可交互元素的文字（用于定位真实选择器）
+async function debugDumpClickables(page, label) {
+    const info = await page.evaluate(() => {
+        const els = Array.from(document.querySelectorAll('button, a, [role="button"], [role="link"], [tabindex]'));
+        return els.map(el => ({
+            tag: el.tagName,
+            text: el.innerText?.trim().slice(0, 80),
+            role: el.getAttribute('role'),
+            id: el.id,
+            cls: el.className?.slice(0, 60),
+        })).filter(e => e.text);
+    });
+    console.log(`\n🔍 [${label}] 当前页面可交互元素：`);
+    info.forEach(e => console.log(`  [${e.tag}] id="${e.id}" | text="${e.text}" | role="${e.role}" | class="${e.cls}"`));
+    console.log('');
+}
+
+// 🖱️ 通用宽松点击：按文字片段查找任意可点击元素
+async function clickByText(page, texts, timeoutMs = 8000) {
+    // texts 是数组，按优先级依次尝试
+    for (const text of texts) {
+        try {
+            // 精确子串匹配，覆盖 button/a/div/li/span 等所有标签
+            const loc = page.locator(`button, a, [role="button"], [role="link"], li, div[tabindex], span[tabindex]`)
+                .filter({ hasText: text })
+                .first();
+            if (await loc.isVisible({ timeout: timeoutMs }).catch(() => false)) {
+                await loc.click({ force: true });
+                console.log(`  ✅ 已点击: "${text}"`);
+                return true;
+            }
+        } catch { }
+    }
+    return false;
+}
+
+// 🔐 处理 Discord 登录后的所有 MFA 情况
 async function handleMFA(page, twoFaSecret) {
+    // 等待页面稳定
     await page.waitForTimeout(3000);
 
-    // ── 第一步：检测是否出现了 MFA 主页面（通行密钥默认弹出的页面）──
-    const mfaHeading = page.locator([
-        'h1:has-text("多重认证")',
-        'h1:has-text("Multi-Factor Authentication")',
-        'h2:has-text("多重认证")',
-        'h2:has-text("Multi-Factor Authentication")',
-        // Discord 有时用 div 而非 h 标签
-        'div:has-text("多重认证")',
-        'div:has-text("Multi-Factor Authentication")',
-    ].join(', ')).first();
+    // ── 检测是否在 Discord 登录域 ──
+    const currentUrl = page.url();
+    if (!currentUrl.includes('discord.com')) {
+        console.log('ℹ️ 已跳出 Discord，无需处理 MFA');
+        return;
+    }
 
-    const isMfaPage = await mfaHeading.isVisible({ timeout: 5000 }).catch(() => false);
+    // ── 调试：打印当前页面所有可点击元素 ──
+    await debugDumpClickables(page, '登录后');
 
-    if (isMfaPage) {
-        console.log('🔑 检测到 MFA 主页（通行密钥模式），尝试切换到验证器...');
+    // ── 检测页面文字，判断 MFA 类型 ──
+    const bodyText = await page.evaluate(() => document.body.innerText);
+    console.log(`📄 页面文字片段: ${bodyText.slice(0, 300).replace(/\n/g, ' | ')}`);
 
-        // ── 第二步：点击「以其他方式验证」/ 「Verify with something else」──
-        const otherWayBtn = page.locator([
-            'button:has-text("以其他方式验证")',
-            'button:has-text("Verify with something else")',
-            'a:has-text("以其他方式验证")',
-            'a:has-text("Verify with something else")',
-            // 兜底：文字节点匹配
-            'text="以其他方式验证"',
-            'text="Verify with something else"',
-        ].join(', ')).first();
+    const isMfaPage = /多重认证|Multi-Factor Authentication|Two-factor authentication|两步验证/i.test(bodyText);
+    const hasPasskeyPrompt = /通行密钥|passkey|security key|安全密钥/i.test(bodyText);
+    const alreadyHas6digitInput = await page.locator([
+        'input[autocomplete="one-time-code"]',
+        'input[maxlength="6"]',
+        'input[placeholder*="6"]',
+        'input[placeholder*="验证码"]',
+        'input[placeholder*="digit"]',
+    ].join(', ')).first().isVisible({ timeout: 1000 }).catch(() => false);
 
-        const hasOtherWay = await otherWayBtn.isVisible({ timeout: 8000 }).catch(() => false);
+    console.log(`  isMfaPage=${isMfaPage} | hasPasskeyPrompt=${hasPasskeyPrompt} | alreadyHas6digitInput=${alreadyHas6digitInput}`);
 
-        if (hasOtherWay) {
-            await otherWayBtn.click();
-            await page.waitForTimeout(1500);
-            console.log('✅ 已点击「以其他方式验证」');
+    // ── 如果已经直接显示 6 位输入框，跳过切换步骤 ──
+    if (!alreadyHas6digitInput && isMfaPage) {
 
-            // ── 第三步：点击「使用验证器」/ 「Use your authenticator app」──
-            const useAuthBtn = page.locator([
-                'button:has-text("使用验证器")',
-                'button:has-text("Use your authenticator app")',
-                'div[class*="option"]:has-text("使用验证器")',
-                'div[class*="option"]:has-text("Use your authenticator app")',
-                'li:has-text("使用验证器")',
-                'li:has-text("Use your authenticator app")',
-                // 兜底：文字节点匹配
-                'text="使用验证器"',
-                'text="Use your authenticator app"',
-            ].join(', ')).first();
+        if (hasPasskeyPrompt) {
+            console.log('🔑 检测到通行密钥页面，尝试切换到验证器...');
+        } else {
+            console.log('🔑 检测到 MFA 页面，尝试切换到验证器...');
+        }
 
-            const hasAuthApp = await useAuthBtn.isVisible({ timeout: 8000 }).catch(() => false);
+        // ── 第一步：点击「以其他方式验证 / Verify with something else」──
+        const clickedOther = await clickByText(page, [
+            '以其他方式验证',
+            'Verify with something else',
+            '其他验证方式',
+            'Use a different method',
+            '使用其他方法',
+            '其他方式',
+        ]);
 
-            if (hasAuthApp) {
-                await useAuthBtn.click();
-                await page.waitForTimeout(1500);
-                console.log('✅ 已切换至验证器输入页');
+        if (clickedOther) {
+            await page.waitForTimeout(2000);
+            // 再次调试打印，看切换后出现了什么
+            await debugDumpClickables(page, '点击「其他方式」后');
+
+            // ── 第二步：点击「使用验证器 / Use your authenticator app」──
+            const clickedAuth = await clickByText(page, [
+                '使用验证器',
+                'Use your authenticator app',
+                'Authenticator app',
+                '验证器应用',
+                '身份验证器',
+                'TOTP',
+            ]);
+
+            if (clickedAuth) {
+                await page.waitForTimeout(2000);
+                await debugDumpClickables(page, '点击「使用验证器」后');
             } else {
-                console.warn('⚠️ 未找到「使用验证器」按钮，尝试直接查找 6 位输入框...');
+                console.warn('⚠️ 未找到「使用验证器」，查看上方调试输出确认实际按钮文字');
             }
         } else {
-            console.warn('⚠️ 未找到「以其他方式验证」按钮，尝试直接查找 6 位输入框...');
+            console.warn('⚠️ 未找到「以其他方式验证」，查看上方调试输出确认实际按钮文字');
         }
     }
 
-    // ── 第四步：无论走哪条路，最终都统一处理 6 位验证码输入──
-    // 兼容：直接弹 2FA、通行密钥绕过后、中英文界面
+    // ── 最终统一处理 6 位验证码输入 ──
     const twoFaInput = page.locator([
         'input[autocomplete="one-time-code"]',
+        'input[maxlength="6"]',
         'input[placeholder*="6-digit"]',
         'input[placeholder*="6位"]',
         'input[placeholder*="验证码"]',
-        'input[maxlength="6"]',
+        'input[placeholder*="digit"]',
+        'input[type="text"][maxlength]',
     ].join(', ')).first();
 
-    const has2FA = await twoFaInput.waitFor({ state: 'visible', timeout: 10000 }).then(() => true).catch(() => false);
+    const has2FA = await twoFaInput.waitFor({ state: 'visible', timeout: 12000 }).then(() => true).catch(() => false);
 
     if (has2FA) {
-        if (!twoFaSecret) {
-            throw new Error('❌ 触发了 2FA / MFA，但未配置该账号的 2FA 秘钥 (格式: 账号,密码,秘钥)');
-        }
+        if (!twoFaSecret) throw new Error('❌ 触发了 2FA/MFA，但未配置该账号的 2FA 秘钥 (格式: 账号,密码,秘钥)');
         console.log('🔐 正在自动计算并填写 6 位验证码...');
         const token = authenticator.generate(twoFaSecret.replace(/\s/g, ''));
         await twoFaInput.fill(token);
         await page.waitForTimeout(500);
 
-        // 提交按钮：兼容中英文
+        // 提交：优先 type=submit，兼容各种文字按钮
         const submitBtn = page.locator([
             'button[type="submit"]',
             'button:has-text("登录")',
@@ -160,13 +200,17 @@ async function handleMFA(page, twoFaSecret) {
             'button:has-text("Submit")',
             'button:has-text("确认")',
             'button:has-text("Confirm")',
+            'button:has-text("继续")',
+            'button:has-text("Continue")',
         ].join(', ')).first();
 
         await submitBtn.click();
         await page.waitForTimeout(4000);
         console.log('✅ 验证码已提交');
     } else {
-        console.log('ℹ️ 未检测到 2FA 输入框，跳过 MFA 处理（可能账号无 2FA）');
+        // 最后再打印一次，帮助排查
+        await debugDumpClickables(page, '未找到输入框时');
+        console.log('ℹ️ 未检测到 6 位输入框，跳过 MFA（或页面结构需根据上方调试输出调整）');
     }
 }
 
@@ -212,7 +256,7 @@ test('FreezeHost 多账号全自动续期', async () => {
             await page.fill('input[name="password"]', password);
             await page.click('button[type="submit"]');
 
-            // 🔐 统一 MFA 处理（兼容：无2FA / 直接2FA / 通行密钥绕过2FA / 中英文界面）
+            // 🔐 统一 MFA 处理
             await handleMFA(page, twoFaSecret);
 
             // 授权页（如出现）
@@ -302,7 +346,6 @@ test('FreezeHost 多账号全自动续期', async () => {
                                 await page.waitForTimeout(1500);
 
                                 const realRenewBtn = page.locator('a:has-text("RENEW INSTANCE"), button:has-text("RENEW INSTANCE")').first();
-
                                 if (await realRenewBtn.isVisible()) {
                                     await realRenewBtn.hover();
                                     await page.waitForTimeout(300);
@@ -326,12 +369,7 @@ test('FreezeHost 多账号全自动续期', async () => {
                                     await page.goto(srv.url, { waitUntil: 'domcontentloaded' });
                                     await page.waitForTimeout(4000);
                                     postTime = await getRemainingTime(page);
-
-                                    if (postTime.totalDays > preTime.totalDays) {
-                                        success = true;
-                                        break;
-                                    }
-
+                                    if (postTime.totalDays > preTime.totalDays) { success = true; break; }
                                     console.log(`  ⏳ 数据未同步，等待 5 秒后重试 (${retry + 1}/3)...`);
                                     await page.waitForTimeout(5000);
                                 }
@@ -341,7 +379,6 @@ test('FreezeHost 多账号全自动续期', async () => {
                                 } else {
                                     accReportLines.push(`${srv.name} : ✅ 续期指令已发送 (面板刷新延迟，当前: ${postTime.text})`);
                                 }
-
                             } else {
                                 accReportLines.push(`${srv.name} : ⏳ 未到期 (按钮: ${btnText})`);
                             }
@@ -361,7 +398,6 @@ test('FreezeHost 多账号全自动续期', async () => {
             let accountBlock = `🎮 FreezeHost ${discordUser} 续期报告\n\n` +
                 accReportLines.join('\n') + `\n\n` +
                 `💰 账户余额：${coinBalance} 金币`;
-
             finalTgBlocks.push(accountBlock);
             await context.close();
         }
